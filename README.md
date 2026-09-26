@@ -26,5 +26,5 @@ Following **Part 1** (focused purely on **NumPy** array operations), this projec
 
 1. **Clone the repository:**
    ```bash
-   git clone [https://github.com/YOUR_USERNAME/heart-failure-clinical-analysis.git](https://github.com/mohamedomustafam-ux/heart-failure-clinical-analysis.git)
+   git clone [https://github.com/mohamedomustafam-ux/heart-failure-clinical-analysis.git](https://github.com/mohamedomustafam-ux/heart-failure-clinical-analysis.git)
    cd heart-failure-clinical-analysis
