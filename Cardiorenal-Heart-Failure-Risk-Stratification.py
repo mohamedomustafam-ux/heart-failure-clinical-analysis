@@ -3,6 +3,7 @@
 Usage:
     python Cardiorenal-Heart-Failure-Risk-Stratification.py            # report only
     python Cardiorenal-Heart-Failure-Risk-Stratification.py --export   # also save processed CSV
+    python Cardiorenal-Heart-Failure-Risk-Stratification.py --data heart_failure_clinical_records.csv   # extended file
 """
 
 import argparse
@@ -22,7 +23,7 @@ CREATININE_SEVERE = 2.5    # mg/dL
 CREATININE_CARDIORENAL = 1.5  # mg/dL, used together with EF < 40%
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FILE_PATH = os.path.join(BASE_DIR, 'heart_failure_clinical_records.csv')
+DEFAULT_DATA = 'heart_failure_clinical_records_dataset.csv'  # original 299-patient UCI file
 PROCESSED_PATH = os.path.join(BASE_DIR, 'processed_heart_failure_records.csv')
 
 
@@ -128,9 +129,10 @@ def report(df: pd.DataFrame) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--export', action='store_true', help='save the processed dataset as CSV')
+    parser.add_argument('--data', default=DEFAULT_DATA, help='CSV file next to this script')
     args = parser.parse_args()
 
-    df = add_clinical_features(convert_types(load_data(FILE_PATH)))
+    df = add_clinical_features(convert_types(load_data(os.path.join(BASE_DIR, args.data))))
     report(df)
 
     if args.export:
