@@ -1,121 +1,142 @@
+"""Heart failure clinical records: feature engineering and risk flags.
+
+Usage:
+    python Cardiorenal-Heart-Failure-Risk-Stratification.py            # report only
+    python Cardiorenal-Heart-Failure-Risk-Stratification.py --export   # also save processed CSV
+"""
+
+import argparse
 import os
 
 import numpy as np
 import pandas as pd
 
-# 1. Open data file and Create DataFrame
+# ---- Thresholds (kept in one place so they are easy to review) ----
+EF_REDUCED = 40            # EF < 40%        -> HFrEF
+EF_MILDLY_REDUCED = 50     # 40% <= EF < 50% -> HFmrEF
+EF_SEVERE = 30             # EF < 30%        -> severe LV dysfunction
+CPK_ELEVATED = 1000        # U/L, simple cut-off used here for "markedly elevated CPK"
+CREATININE_FEMALE = 1.2    # mg/dL
+CREATININE_MALE = 1.4      # mg/dL
+CREATININE_SEVERE = 2.5    # mg/dL
+CREATININE_CARDIORENAL = 1.5  # mg/dL, used together with EF < 40%
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FILE_PATH = os.path.join(BASE_DIR, 'heart_failure_clinical_records.csv')
+PROCESSED_PATH = os.path.join(BASE_DIR, 'processed_heart_failure_records.csv')
 
-df_heart_fcr = pd.read_csv(FILE_PATH)
 
-# 2. Check data
-print(f"Info:\n{df_heart_fcr.info()}\n")
-print(f"Check missing data:\n{pd.isna(df_heart_fcr).sum().to_string()}\n")
-print(f"Describe data:\n{df_heart_fcr.describe()}\n")
+def load_data(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    n_before = len(df)
+    # The CSV contains many exact duplicate rows (5,000 rows, only 1,320 unique). Keeping them
+    # would inflate every count, so the analysis uses unique rows only.
+    df = df.drop_duplicates().reset_index(drop=True)
+    print(f"Rows in file: {n_before} | exact duplicates removed: {n_before - len(df)} | unique rows kept: {len(df)}\n")
+    print("Info:")
+    df.info()  # prints directly (it returns None, so do not wrap it in an f-string)
+    print(f"\nMissing values per column:\n{df.isna().sum().to_string()}\n")
+    print(f"Describe data:\n{df.describe()}\n")
+    return df
 
-# 3. Data type conversion
-df_heart_fcr = df_heart_fcr.astype(
-    {
-        'anaemia': bool,
-        'DEATH_EVENT': bool,
-        'diabetes': bool,
-        'high_blood_pressure': bool,
-        'smoking': bool,
-        'ejection_fraction': np.int64,
-        'time': np.int64,
-        'sex': np.int64,
-        'age': np.float64,
-        'creatinine_phosphokinase': np.float64,
-        'serum_creatinine': np.float64,
-        'serum_sodium': np.float64,
-        'platelets': np.float64
-    }
-)
 
-# Baseline mortality rate
-print(f"Overall Mortality Rate:\n{df_heart_fcr['DEATH_EVENT'].value_counts(normalize=True).to_string()}\n")
+def convert_types(df: pd.DataFrame) -> pd.DataFrame:
+    return df.astype(
+        {
+            'anaemia': bool,
+            'DEATH_EVENT': bool,
+            'diabetes': bool,
+            'high_blood_pressure': bool,
+            'smoking': bool,
+            'ejection_fraction': np.int64,
+            'time': np.int64,
+            'sex': np.int64,  # dataset coding: 1 = male, 0 = female
+            'age': np.float64,
+            'creatinine_phosphokinase': np.float64,
+            'serum_creatinine': np.float64,
+            'serum_sodium': np.float64,
+            'platelets': np.float64,
+        }
+    )
 
-# 4. Clinical Diagnoses & Categorization
-# Unified Heart Failure Classification (EF)
-ef_conditions = [
-    df_heart_fcr['ejection_fraction'] < 40,
-    (df_heart_fcr['ejection_fraction'] >= 40) & (df_heart_fcr['ejection_fraction'] < 50)
-]
-ef_choices = ['HFrEF', 'HFmrEF']
-df_heart_fcr['EF_Category'] = np.select(ef_conditions, ef_choices, default='Preserved')
 
-# Severe Left Ventricular Dysfunction
-df_heart_fcr['Severe_Left_Ventricular_Dysfunction'] = np.where(
-    df_heart_fcr['ejection_fraction'] < 30,
-    'Severe_LV_Dysfunction',
-    'Normal'
-)
+def add_clinical_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
 
-# Severe Myocardial Injury (Replaced '/' with '_')
-df_heart_fcr['Severe_Myocardial_Injury'] = np.where(
-    df_heart_fcr['creatinine_phosphokinase'] > 1000,
-    'Severe_Injury',
-    'Normal'
-)
+    # Heart failure classification by ejection fraction
+    ef_conditions = [
+        df['ejection_fraction'] < EF_REDUCED,
+        (df['ejection_fraction'] >= EF_REDUCED) & (df['ejection_fraction'] < EF_MILDLY_REDUCED),
+    ]
+    df['EF_Category'] = np.select(ef_conditions, ['HFrEF', 'HFmrEF'], default='Preserved')
 
-# Renal Impairment (Explicit sex comparison)
-df_heart_fcr['Renal_Impairment'] = np.where(
-    ((df_heart_fcr['serum_creatinine'] > 1.2) & (df_heart_fcr['sex'] == 0)) |
-    ((df_heart_fcr['serum_creatinine'] > 1.4) & (df_heart_fcr['sex'] == 1)),
-    'Renal_Impairment',
-    'Normal'
-)
+    df['Severe_Left_Ventricular_Dysfunction'] = np.where(
+        df['ejection_fraction'] < EF_SEVERE, 'Severe_LV_Dysfunction', 'Normal'
+    )
 
-# Severe Renal Failure
-df_heart_fcr['Severe_Renal_Failure'] = np.where(
-    df_heart_fcr['serum_creatinine'] > 2.5,
-    'Severe_Failure',
-    'Normal'
-)
+    # CPK also rises with skeletal-muscle injury, so this flag is NOT a diagnosis
+    # of myocardial injury; it only marks a markedly elevated CPK value.
+    df['Markedly_Elevated_CPK'] = np.where(
+        df['creatinine_phosphokinase'] > CPK_ELEVATED, 'Elevated_CPK', 'Normal'
+    )
 
-# Sodium Disturbances
-df_heart_fcr['Hyponatremia'] = np.where(df_heart_fcr['serum_sodium'] < 135, 'Hyponatremia', 'Normal')
-df_heart_fcr['Hypernatremia'] = np.where(df_heart_fcr['serum_sodium'] > 145, 'Hypernatremia', 'Normal')
+    # Sex-specific creatinine thresholds (sex: 0 = female, 1 = male)
+    df['Renal_Impairment'] = np.where(
+        ((df['serum_creatinine'] > CREATININE_FEMALE) & (df['sex'] == 0))
+        | ((df['serum_creatinine'] > CREATININE_MALE) & (df['sex'] == 1)),
+        'Renal_Impairment',
+        'Normal',
+    )
 
-# Platelet Disturbances
-df_heart_fcr['Thrombocytopenia'] = np.where(df_heart_fcr['platelets'] < 150000, 'Thrombocytopenia', 'Normal')
-df_heart_fcr['Thrombocytosis'] = np.where(df_heart_fcr['platelets'] > 450000, 'Thrombocytosis', 'Normal')
+    df['Severe_Renal_Failure'] = np.where(
+        df['serum_creatinine'] > CREATININE_SEVERE, 'Severe_Failure', 'Normal'
+    )
 
-# Complex Syndromes & Risk Triads
-df_heart_fcr['Cardiorenal_Syndrome_Risk'] = np.where(
-    (df_heart_fcr['ejection_fraction'] < 40) & (df_heart_fcr['serum_creatinine'] > 1.5),
-    'High',
-    'Low'
-)
+    # Sodium and platelet disturbances
+    df['Hyponatremia'] = np.where(df['serum_sodium'] < 135, 'Hyponatremia', 'Normal')
+    df['Hypernatremia'] = np.where(df['serum_sodium'] > 145, 'Hypernatremia', 'Normal')
+    df['Thrombocytopenia'] = np.where(df['platelets'] < 150000, 'Thrombocytopenia', 'Normal')
+    df['Thrombocytosis'] = np.where(df['platelets'] > 450000, 'Thrombocytosis', 'Normal')
 
-df_heart_fcr['Vascular_Metabolic_Risk_Triad'] = np.where(
-    (df_heart_fcr['diabetes']) & (df_heart_fcr['high_blood_pressure']) & (df_heart_fcr['smoking']),
-    'High',
-    'Low'
-)
+    # Combined risk flags (data-derived flags, not clinical diagnoses)
+    df['Cardiorenal_Risk_Flag'] = np.where(
+        (df['ejection_fraction'] < EF_REDUCED) & (df['serum_creatinine'] > CREATININE_CARDIORENAL),
+        'High',
+        'Low',
+    )
+    df['Vascular_Metabolic_Risk_Triad'] = np.where(
+        df['diabetes'] & df['high_blood_pressure'] & df['smoking'], 'High', 'Low'
+    )
+    return df
 
-# Aggregations & Reports
-print("--- Cardiorenal Syndrome Mortality Summary ---")
-cardiorenal = df_heart_fcr.groupby('Cardiorenal_Syndrome_Risk')['DEATH_EVENT'].agg(['count', 'mean'])
-cardiorenal['Mortality_Percentage'] = cardiorenal['mean'] * 100
-print(f"{cardiorenal}\n")
 
-print("--- Pivot Table: Renal Impairment vs EF Category (Mortality %) ---")
-pivot_risk = pd.pivot_table(
-    df_heart_fcr,
-    values='DEATH_EVENT',
-    index='Renal_Impairment',
-    columns='EF_Category',
-    aggfunc='mean'
-)
-print(f"{pivot_risk * 100}\n")
+def report(df: pd.DataFrame) -> None:
+    print(f"Overall mortality rate:\n{df['DEATH_EVENT'].value_counts(normalize=True).to_string()}\n")
 
-# Export Processed Data
-key = input("--- Type Y to export or S to Show ---\n :")
-if key.lower() == 'y':
-    PROCESSED_PATH = os.path.join(BASE_DIR, 'processed_heart_failure_records.csv')
-    df_heart_fcr.to_csv(PROCESSED_PATH, index=False)
-    print(f"Saved processed dataset to: {PROCESSED_PATH}")
-else:
-    print("--- Have a nice life ---")
+    print("--- Cardiorenal risk flag: mortality summary ---")
+    summary = df.groupby('Cardiorenal_Risk_Flag')['DEATH_EVENT'].agg(['count', 'mean'])
+    summary['Mortality_Percentage'] = summary['mean'] * 100
+    print(f"{summary}\n")
+
+    print("--- Pivot table: renal impairment vs EF category (mortality %) ---")
+    pivot = pd.pivot_table(
+        df, values='DEATH_EVENT', index='Renal_Impairment', columns='EF_Category', aggfunc='mean'
+    )
+    print(f"{pivot * 100}\n")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--export', action='store_true', help='save the processed dataset as CSV')
+    args = parser.parse_args()
+
+    df = add_clinical_features(convert_types(load_data(FILE_PATH)))
+    report(df)
+
+    if args.export:
+        df.to_csv(PROCESSED_PATH, index=False)
+        print(f"Saved processed dataset to: {PROCESSED_PATH}")
+
+
+if __name__ == '__main__':
+    main()
